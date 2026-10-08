@@ -42,6 +42,10 @@ GENERATED_SOURCES = ["homedy", "nhadatcanban"]  # nguồn cần sinh slug từ t
 def safe_text(el):
     return el.text.strip() if el else None
 
+def clean_address(text):
+    text = re.sub(r"\s+", " ", text or "").strip()          # gộp xuống dòng, tab, nhiều dấu cách
+    text = re.sub(r"\s*xem bản đồ.*$", "", text, flags=re.I)
+    return text.strip(" ,.") or None
 
 def get_number(text):
     if not text:
@@ -177,7 +181,7 @@ def run_urls(driver, db, max_pages=None):
 def parse_project_html(soup, info):
     """Bóc dữ liệu từ HTML trang chi tiết. Trả về dict khớp core.db.PROJECT_COLUMNS."""
     project_name = safe_text(soup.select_one(".re__project-name")) or info["title"]
-    address_raw = re.sub(r"\s*xem bản đồ.*$", "", safe_text(soup.select_one(".re__project-address")) or "", flags=re.I | re.S).strip() or info["location_raw"]
+    address_raw = clean_address(safe_text(soup.select_one(".re__project-address"))) or info["location_raw"]
     description = safe_text(soup.select_one(".js__prj-detail-content"))
     project_type = safe_text(soup.select_one(".re__prj-cat span"))
     project_status = safe_text(soup.select_one(".re__prj-tag-info label")) or info["status_raw"]
