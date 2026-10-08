@@ -19,3 +19,11 @@ python -m crawlers.crawl_<nguon> --keyword "..." --project-id ... --max-pages N
 - Sửa logic bóc dữ liệu thì đổi PARSER_VERSION
 - Mỗi người một branch, không push thẳng main, merge qua Pull Request
 - core/* chỉ người phụ trách feat/db sửa, cần gì thì nhờ
+
+## Mở Chrome debug (cho crawler dùng Selenium)
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir=C:\chrome-debug
+
+## Crawl dự án (chạy từ thư mục gốc repo)
+python -m projects.crawl_projects urls --max-pages 1     # chạy thử bước 1
+python -m projects.crawl_projects details --limit 3      # chạy thử bước 2
+python -m projects.crawl_projects   
