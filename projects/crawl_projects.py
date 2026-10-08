@@ -177,11 +177,10 @@ def run_urls(driver, db, max_pages=None):
 def parse_project_html(soup, info):
     """Bóc dữ liệu từ HTML trang chi tiết. Trả về dict khớp core.db.PROJECT_COLUMNS."""
     project_name = safe_text(soup.select_one(".re__project-name")) or info["title"]
-    address_raw = safe_text(soup.select_one(".re__project-address")) or info["location_raw"]
+    address_raw = re.sub(r"\s*xem bản đồ.*$", "", safe_text(soup.select_one(".re__project-address")) or "", flags=re.I | re.S).strip() or info["location_raw"]
     description = safe_text(soup.select_one(".js__prj-detail-content"))
     project_type = safe_text(soup.select_one(".re__prj-cat span"))
     project_status = safe_text(soup.select_one(".re__prj-tag-info label")) or info["status_raw"]
-    investor = safe_text(soup.select_one(".re__prj-investor a"))
 
     # Tọa độ
     longitude = latitude = None
@@ -212,7 +211,7 @@ def parse_project_html(soup, info):
             land_area_ha = parse_land_area(f"{value} {unit}" if unit else value)
 
     # Thông tin chi tiết
-    num_towers = construction_density = launch_year = handover_year = ownership = None
+    num_towers = construction_density = launch_year = handover_year = ownership = investor = None
     for item in soup.select(".re__project-box-item"):
         label = safe_text(item.select_one("label"))
         value = safe_text(item.select_one("span"))
@@ -234,7 +233,8 @@ def parse_project_html(soup, info):
             handover_year = get_number(value)
         elif "pháp lý" in label_lower or "sở hữu" in label_lower:
             ownership = value
-
+        elif "chủ đầu tư" in label_lower:
+            investor = value
     # Tiện ích
     amenities = [safe_text(li).lower() for li in soup.select(".re__prj-facilities ul li") if safe_text(li)]
 

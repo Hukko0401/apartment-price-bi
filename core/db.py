@@ -19,7 +19,7 @@ PROJECT_COLUMNS = [
     "has_pool", "has_parkinglot", "launch_year", "handover_year", "ownership",
     "project_description", "source_url",
 ]
-INT_COLUMNS = {"num_towers", "total_apartment", "launch_year", "handover_year"}
+INT_COLUMNS = {"num_towers", "total_apartment", "launch_year", "handover_year", "has_mall", "has_school", "has_hospital", "has_park", "has_pool", "has_parkinglot"}
 
 
 def _to_int(value):
