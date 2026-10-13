@@ -21,6 +21,13 @@ PROJECT_COLUMNS = [
 ]
 INT_COLUMNS = {"num_towers", "total_apartment", "launch_year", "handover_year", "has_mall", "has_school", "has_hospital", "has_park", "has_pool", "has_parkinglot"}
 
+LISTING_COLUMNS = [
+    "title", "description_text", "price_raw", "price_total_vnd", "area_raw", "area_m2",
+    "bedrooms", "bathrooms", "direction", "balcony_direction", "legal_status",
+    "furniture_status", "project_name_raw", "address_raw", "address_old_raw",
+    "posted_at", "expired_at", "contact_name", "contact_phone_masked",
+]
+
 
 def _to_int(value):
     """Số bóc từ web hay ra dạng float (3.0) -> int. Không đọc được -> None."""
@@ -236,10 +243,7 @@ class Db:
 
 
     # ---------- Hàng chờ tin đăng: mỗi việc = 1 dự án trên 1 nguồn ----------
-    def claim_source_job(self, source_name, worker, max_attempts=3):
-        """Lấy 1 việc đang chờ (pending, hoặc failed chưa quá số lần thử) và đánh dấu 'running'.
-        Hai máy cùng gọi cũng không bao giờ nhận trùng việc. Hết việc thì trả None.
-        Kết quả: dict gồm project_id, source_name, slug, url, project_name."""
+    def claim_source_job(self, source_name, worker, max_attempts=3, project_id=None):
         sql = """
             with picked as (
                 select project_id, source_name
@@ -247,6 +251,7 @@ class Db:
                 where source_name = %s
                   and crawl_status in ('pending', 'failed')
                   and crawl_attempts < %s
+                  and (%s::text is null or project_id = %s)
                 order by case crawl_status when 'pending' then 0 else 1 end, project_id
                 limit 1
                 for update skip locked
@@ -259,9 +264,9 @@ class Db:
                     crawl_attempts = s.crawl_attempts + 1
                 from picked
                 where s.project_id = picked.project_id and s.source_name = picked.source_name
-                returning s.project_id, s.source_name, s.slug, s.url
+                returning s.project_id, s.source_name, s.slug, s.url, s.listing_list_url
             )
-            select upd.project_id, upd.source_name, upd.slug, upd.url,
+            select upd.project_id, upd.source_name, upd.slug, upd.url, upd.listing_list_url,
                    coalesce(p.project_name, u.title) as project_name
             from upd
             join crawl.project_urls u on u.project_id = upd.project_id
@@ -269,7 +274,7 @@ class Db:
         """
 
         def fn(cur):
-            cur.execute(sql, (source_name, max_attempts, worker))
+            cur.execute(sql, (source_name, max_attempts, project_id, project_id, worker))
             row = cur.fetchone()
             if not row:
                 return None
@@ -277,14 +282,31 @@ class Db:
             return dict(zip(cols, row))
         return self._run(fn)
 
-    def finish_source_job(self, project_id, source_name, listings_found):
-        """Crawl xong: ghi số tin tìm được."""
+    def finish_source_job(self, project_id, source_name, listings_found, listing_list_url=None):
         def fn(cur):
             cur.execute(
                 """update crawl.project_sources
-                   set crawl_status = 'done', listings_found = %s, finished_at = now(), last_error = null
+                   set crawl_status = 'done', listings_found = %s, finished_at = now(),
+                       last_error = null, listing_list_url = coalesce(%s, listing_list_url)
                    where project_id = %s and source_name = %s""",
-                (listings_found, project_id, source_name),
+                (listings_found, listing_list_url, project_id, source_name),
+            )
+        self._run(fn)
+
+    def fail_source_job(self, project_id, source_name, message, error_type="failed"):
+        msg = (message or "")[:500]
+
+        def fn(cur):
+            cur.execute(
+                """update crawl.project_sources
+                   set crawl_status = 'failed', finished_at = now(), last_error = %s
+                   where project_id = %s and source_name = %s""",
+                (msg, project_id, source_name),
+            )
+            cur.execute(
+                """insert into crawl.crawl_errors (stage, source_name, ref_id, error_type, message)
+                   values ('source_job', %s, %s, %s, %s)""",
+                (source_name, project_id, error_type, msg),
             )
         self._run(fn)
 
@@ -299,23 +321,6 @@ class Db:
             )
         self._run(fn)
 
-    def fail_source_job(self, project_id, source_name, message):
-        """Lỗi: ghi lại để thử lại sau (tối đa max_attempts lần) và lưu vào crawl_errors."""
-        msg = (message or "")[:500]
-
-        def fn(cur):
-            cur.execute(
-                """update crawl.project_sources
-                   set crawl_status = 'failed', finished_at = now(), last_error = %s
-                   where project_id = %s and source_name = %s""",
-                (msg, project_id, source_name),
-            )
-            cur.execute(
-                """insert into crawl.crawl_errors (stage, source_name, ref_id, error_type, message)
-                   values ('source_job', %s, %s, 'failed', %s)""",
-                (source_name, project_id, msg),
-            )
-        self._run(fn)
 
     def update_source_url(self, project_id, source_name, url):
         """Crawler tìm được link thật của dự án trên trang đó thì lưu lại."""
@@ -349,4 +354,112 @@ class Db:
             for source, status, total in cur.fetchall():
                 result.setdefault(source, {})[status] = total
             return result
+        return self._run(fn)
+
+    # ---------- Tin đăng ----------
+    def save_listing_urls(self, cards, all_types=False):
+        """Upsert card của 1 trang list. Trả về số tin MỚI. Tin không phải căn hộ chung cư
+        được lưu với trạng thái 'skipped' (trừ khi all_types)."""
+        sql = """
+            insert into crawl.listing_urls as lu
+                (source_name, source_listing_id, listing_url, project_id, category_slug,
+                 is_apartment, list_page_url, page_number, vip_type, card_title,
+                 card_price_raw, card_area_raw, card_location_raw, card_posted_raw, detail_status)
+            values
+                (%(source_name)s, %(source_listing_id)s, %(listing_url)s, %(project_id)s,
+                 %(category_slug)s, %(is_apartment)s, %(list_page_url)s, %(page_number)s,
+                 %(vip_type)s, %(card_title)s, %(card_price_raw)s, %(card_area_raw)s,
+                 %(card_location_raw)s, %(card_posted_raw)s, %(detail_status)s)
+            on conflict (source_name, source_listing_id) do update set
+                last_seen_at      = now(),
+                listing_url       = excluded.listing_url,
+                project_id        = coalesce(lu.project_id, excluded.project_id),
+                vip_type          = excluded.vip_type,
+                card_title        = excluded.card_title,
+                card_price_raw    = excluded.card_price_raw,
+                card_area_raw     = excluded.card_area_raw,
+                card_location_raw = excluded.card_location_raw,
+                card_posted_raw   = excluded.card_posted_raw
+            returning (xmax = 0) as inserted
+        """
+
+        def fn(cur):
+            new_count = 0
+            for card in cards:
+                status = "pending" if (card["is_apartment"] or all_types) else "skipped"
+                cur.execute(sql, {**card, "detail_status": status})
+                new_count += 1 if cur.fetchone()[0] else 0
+            return new_count
+        return self._run(fn)
+
+    def fetch_pending_listings(self, source_name, limit=None, max_attempts=3):
+        def fn(cur):
+            cur.execute(
+                """select source_listing_id, listing_url, project_id,
+                          card_title, card_price_raw, card_area_raw
+                   from crawl.listing_urls
+                   where source_name = %s
+                     and detail_status in ('pending', 'failed')
+                     and detail_attempts < %s
+                   order by (detail_status = 'failed'), discovered_at
+                   limit %s""",
+                (source_name, max_attempts, limit or 1_000_000),
+            )
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        return self._run(fn)
+
+    def save_listing(self, source_name, source_listing_id, project_id, listing_url, data, parser_version):
+        """Ghi chi tiết tin và đánh dấu listing_urls là 'done' (cùng 1 transaction)."""
+        params = {col: data.get(col) for col in LISTING_COLUMNS}
+        params.update({"src": source_name, "lid": source_listing_id, "pid": project_id,
+                       "url": listing_url, "ver": parser_version})
+        cols = ", ".join(LISTING_COLUMNS)
+        marks = ", ".join(f"%({c})s" for c in LISTING_COLUMNS)
+        updates = ", ".join(f"{c} = excluded.{c}" for c in LISTING_COLUMNS)
+        upsert = f"""
+            insert into crawl.listings
+                (source_name, source_listing_id, project_id, listing_url, parser_version, {cols})
+            values (%(src)s, %(lid)s, %(pid)s, %(url)s, %(ver)s, {marks})
+            on conflict (source_name, source_listing_id) do update set
+                project_id = coalesce(crawl.listings.project_id, excluded.project_id),
+                listing_url = excluded.listing_url,
+                parser_version = excluded.parser_version,
+                scraped_at = now(),
+                {updates}
+        """
+        done = """
+            update crawl.listing_urls
+            set detail_status = 'done', detail_done_at = now(),
+                detail_attempts = detail_attempts + 1, last_error = null
+            where source_name = %(src)s and source_listing_id = %(lid)s
+        """
+
+        def fn(cur):
+            cur.execute(upsert, params)
+            cur.execute(done, params)
+        self._run(fn)
+
+    def mark_listing_detail(self, source_name, source_listing_id, status, message=None):
+        """status: 'failed' (thử lại nếu chưa quá max_attempts) hoặc 'gone' (tin đã bị gỡ)."""
+        msg = (message or "")[:500]
+
+        def fn(cur):
+            cur.execute(
+                """update crawl.listing_urls
+                   set detail_status = %s, detail_attempts = detail_attempts + 1, last_error = %s
+                   where source_name = %s and source_listing_id = %s""",
+                (status, msg, source_name, source_listing_id),
+            )
+        self._run(fn)
+
+    def listing_progress(self, source_name=None):
+        def fn(cur):
+            cur.execute(
+                """select detail_status, count(*) from crawl.listing_urls
+                   where (%s::text is null or source_name = %s)
+                   group by detail_status order by detail_status""",
+                (source_name, source_name),
+            )
+            return {status: total for status, total in cur.fetchall()}
         return self._run(fn)
