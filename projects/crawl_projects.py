@@ -23,7 +23,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
 
 from core.db import Db
-from core.parse import slugify
+
 
 SOURCE_NAME = "batdongsan"
 PARSER_VERSION = "1.0.0"  # Sửa logic bóc dữ liệu thì đổi số này (vd 1.0.0 -> 1.1.0)
@@ -35,7 +35,7 @@ MAX_CONSECUTIVE_FAILS = 5  # lỗi liên tiếp quá số này thì dừng (nghi
 
 PROJECT_CODE_RE = re.compile(r"-pj(\d+)(?:[/?#]|$)")
 PROJECT_CODE_TAIL_RE = re.compile(r"-pj\d+$")
-GENERATED_SOURCES = ["homedy", "nhadatcanban"]  # nguồn cần sinh slug từ tên dự án
+
 
 
 # ---------- hàm tiện ích ----------
@@ -317,32 +317,11 @@ def run_details(driver, db, limit=None, max_attempts=3):
     print(f"\nXong bước 2: {ok} thành công, {failed} lỗi")
 
 
-# ---------- Bước 3: sinh slug cho homedy / nhadatcanban (không cần trình duyệt) ----------
-def run_slugs(db):
-    print("\n" + "=" * 60)
-    print("BƯỚC 3: SINH SLUG CHO homedy / nhadatcanban -> crawl.project_sources")
-    print("=" * 60)
-
-    projects = db.get_projects_for_slugs()
-    rows = []
-    for p in projects:
-        slug = slugify(p["name"])
-        if not slug:
-            db.log_error("project_slugs", None, None, "no_slug",
-                         f"Không sinh được slug từ tên: {p['name']!r}", ref_id=p["project_id"])
-            continue
-        rows.extend((p["project_id"], source, slug) for source in GENERATED_SOURCES)
-
-    created = db.add_generated_slugs(rows)
-    print(f"Xong bước 3: {len(projects)} dự án, thêm {created} dòng slug mới "
-          f"({len(rows) - created} dòng đã có, giữ nguyên)")
 
 
-# ---------- main ----------
 def main():
     parser = argparse.ArgumentParser(description="Crawl dự án batdongsan -> Supabase")
-    parser.add_argument("stage", nargs="?", default="all",
-                        choices=["all", "urls", "details", "slugs"])
+    parser.add_argument("stage", nargs="?", default="all", choices=["all", "urls", "details"])
     parser.add_argument("--max-pages", type=int, default=None, help="Giới hạn số trang (bước 1)")
     parser.add_argument("--limit", type=int, default=None, help="Giới hạn số dự án (bước 2)")
     parser.add_argument("--max-attempts", type=int, default=3, help="Số lần thử tối đa mỗi dự án (bước 2)")
@@ -352,16 +331,11 @@ def main():
         name, now = db.ping()
         print(f"Đã nối DB: {name} ({now:%Y-%m-%d %H:%M:%S})")
 
-        driver = None
-        if args.stage in ("all", "urls", "details"):
-            driver = connect_chrome()  # không quit để giữ Chrome đang mở
-
+        driver = connect_chrome()  # không quit để giữ Chrome đang mở
         if args.stage in ("all", "urls"):
             run_urls(driver, db, args.max_pages)
         if args.stage in ("all", "details"):
             run_details(driver, db, args.limit, args.max_attempts)
-        if args.stage in ("all", "slugs"):
-            run_slugs(db)
 
         print(f"\nTiến độ: {db.progress()}")
 

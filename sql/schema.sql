@@ -135,3 +135,20 @@ left join crawl.projects p on p.project_id = u.project_id
 left join crawl.project_sources s on s.project_id = u.project_id
 group by u.project_id, p.project_name, u.title
 order by u.project_id;
+
+-- Bỏ bước sinh slug: slug_origin không còn bắt buộc; homedy/nhadatcanban tự xác định link trong crawler riêng
+alter table crawl.project_sources alter column slug_origin drop not null;
+alter table crawl.project_sources alter column slug_origin drop default;
+
+-- Xóa slug đã sinh tự động (nếu trước đó có chạy bước slugs). Slug sửa tay (manual) giữ nguyên
+update crawl.project_sources
+set slug = null, slug_origin = null
+where source_name in ('homedy', 'nhadatcanban')
+  and slug_origin = 'generated';
+
+-- Tạo sẵn hàng chờ cho 2 nguồn (mỗi dự án 1 dòng/nguồn), chưa có slug. Chạy lại nhiều lần vẫn an toàn
+insert into crawl.project_sources (project_id, source_name)
+select u.project_id, s.source_name
+from crawl.project_urls u
+cross join (values ('homedy'), ('nhadatcanban')) as s(source_name)
+on conflict (project_id, source_name) do nothing;
