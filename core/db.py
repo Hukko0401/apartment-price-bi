@@ -331,6 +331,16 @@ class Db:
             )
         self._run(fn)
 
+    def set_listing_list_url(self, project_id, source_name, list_url):
+        """Lưu ngay link tổng hợp tin vừa dò được, để lần chạy lại không phải dò lại."""
+        def fn(cur):
+            cur.execute(
+                "update crawl.project_sources set listing_list_url = %s "
+                "where project_id = %s and source_name = %s",
+                (list_url, project_id, source_name),
+            )
+        self._run(fn)
+
     def release_stale_jobs(self, source_name=None, minutes=60):
         """Việc 'running' quá lâu (máy tắt giữa chừng) -> trả về 'pending' để máy khác làm.
         Trả về số việc được trả lại."""
