@@ -473,3 +473,156 @@ class Db:
             )
             return {status: total for status, total in cur.fetchall()}
         return self._run(fn)
+
+    # ======================================================================
+    # DÁN CẢ KHỐI NÀY VÀO CUỐI class Db trong core/db.py (sau source_progress).
+    # Không cần import thêm ở đầu file.
+    # ======================================================================
+
+    # ---------- Tin đăng: listing_urls + listings + listing_discoveries ----------
+    def save_listing_records(self, records):
+        """Ghi các tin vừa crawl trong 1 transaction.
+        records = list dict tạo bởi core.record.new_record (trường `discovery` là dict, xem crawlers/nhadatcanban.py).
+          1) crawl.listing_urls        mọi tin
+          2) crawl.listings            chỉ tin đã lấy được trang chi tiết (detail_status = 'done')
+          3) crawl.listing_discoveries từ khóa / trang / hạng / độ khớp đã tìm ra tin
+        Ghi lại nhiều lần không làm hỏng dữ liệu: tin đã 'done' không bị hạ về 'pending',
+        giá trị cũ không bị ghi đè bằng NULL. Trả về {'urls': n, 'listings': n, 'discoveries': n}."""
+        from datetime import datetime, timezone
+
+        # Trong 1 câu INSERT ... ON CONFLICT mỗi khóa chỉ được xuất hiện 1 lần.
+        unique = {}
+        for r in records:
+            unique[(r["source_name"], r["source_listing_id"])] = r
+        records = list(unique.values())
+        if not records:
+            return {"urls": 0, "listings": 0, "discoveries": 0}
+
+        now = datetime.now(timezone.utc)
+        url_rows, listing_rows, disc_rows = [], [], []
+        for r in records:
+            d = r.get("discovery") or {}
+            status = d.get("detail_status") or "pending"
+            attempted = 1 if status in ("done", "failed") else 0
+            url_rows.append((
+                r["source_name"], r["source_listing_id"], r["listing_url"], d.get("project_id"),
+                d.get("category_slug"), bool(d.get("is_apartment", False)),
+                d.get("list_page_url"), d.get("page_number"), d.get("vip_type"),
+                d.get("card_title"), d.get("card_price_raw"), d.get("card_area_raw"),
+                d.get("card_location_raw"), d.get("card_posted_raw"),
+                status, attempted, now if status == "done" else None,
+                d.get("detail_error") if status == "failed" else None,
+            ))
+            if status == "done":
+                address_old = d.get("address_old_raw")
+                listing_rows.append((
+                    r["source_name"], r["source_listing_id"], d.get("project_id"), r["listing_url"],
+                    r.get("transaction_type") or "sale", r.get("title"), r.get("description"),
+                    r.get("price_raw"), r.get("price_total_vnd"), r.get("area_raw"), r.get("area_m2"),
+                    r.get("bedrooms"), r.get("bathrooms"), r.get("direction"), d.get("balcony_direction"),
+                    r.get("legal_status"), r.get("furniture_status"), r.get("project_name_raw"),
+                    None if address_old else r.get("location_raw"),  # nguồn dùng địa chỉ cũ -> address_old_raw
+                    r.get("posted_at"), r.get("expired_at"),
+                    r.get("contact_name"), r.get("contact_phone_masked"),
+                    r.get("scraped_at"), r.get("parser_version"), address_old,
+                ))
+            if d.get("project_id") and d.get("search_keyword"):
+                disc_rows.append((
+                    r["source_name"], r["source_listing_id"], d["project_id"], d["search_keyword"],
+                    d.get("search_city") or "", d.get("search_page"), d.get("search_rank"),
+                    d.get("match_level"), d.get("name_in_title"), d.get("name_in_desc"),
+                    d.get("matched_name"), d.get("match_ambiguous"),
+                ))
+
+        urls_sql = """
+            insert into crawl.listing_urls
+                (source_name, source_listing_id, listing_url, project_id, category_slug, is_apartment,
+                 list_page_url, page_number, vip_type, card_title, card_price_raw, card_area_raw,
+                 card_location_raw, card_posted_raw, detail_status, detail_attempts, detail_done_at, last_error)
+            values %s
+            on conflict (source_name, source_listing_id) do update set
+                listing_url       = excluded.listing_url,
+                project_id        = coalesce(crawl.listing_urls.project_id, excluded.project_id),
+                category_slug     = coalesce(excluded.category_slug, crawl.listing_urls.category_slug),
+                is_apartment      = case when crawl.listing_urls.detail_status = 'done' and excluded.detail_status <> 'done'
+                                         then crawl.listing_urls.is_apartment else excluded.is_apartment end,
+                list_page_url     = coalesce(excluded.list_page_url, crawl.listing_urls.list_page_url),
+                page_number       = coalesce(excluded.page_number, crawl.listing_urls.page_number),
+                vip_type          = coalesce(excluded.vip_type, crawl.listing_urls.vip_type),
+                card_title        = coalesce(excluded.card_title, crawl.listing_urls.card_title),
+                card_price_raw    = coalesce(excluded.card_price_raw, crawl.listing_urls.card_price_raw),
+                card_area_raw     = coalesce(excluded.card_area_raw, crawl.listing_urls.card_area_raw),
+                card_location_raw = coalesce(excluded.card_location_raw, crawl.listing_urls.card_location_raw),
+                card_posted_raw   = coalesce(excluded.card_posted_raw, crawl.listing_urls.card_posted_raw),
+                last_seen_at      = now(),
+                detail_status     = case when crawl.listing_urls.detail_status = 'done' and excluded.detail_status <> 'done'
+                                         then 'done' else excluded.detail_status end,
+                detail_attempts   = crawl.listing_urls.detail_attempts + excluded.detail_attempts,
+                detail_done_at    = case when excluded.detail_status = 'done' then excluded.detail_done_at
+                                         else crawl.listing_urls.detail_done_at end,
+                last_error        = case when excluded.detail_status = 'done' then null
+                                         when excluded.detail_status = 'failed' then excluded.last_error
+                                         else crawl.listing_urls.last_error end
+        """
+
+        listing_cols = [
+            "source_name", "source_listing_id", "project_id", "listing_url", "listing_type", "title",
+            "description_text", "price_raw", "price_total_vnd", "area_raw", "area_m2", "bedrooms",
+            "bathrooms", "direction", "balcony_direction", "legal_status", "furniture_status",
+            "project_name_raw", "address_raw", "posted_at", "expired_at", "contact_name",
+            "contact_phone_masked", "scraped_at", "parser_version", "address_old_raw",
+        ]
+        set_parts = []
+        for c in listing_cols[2:]:
+            if c in ("scraped_at", "parser_version"):
+                set_parts.append(f"{c} = excluded.{c}")
+            elif c == "project_id":
+                set_parts.append("project_id = coalesce(crawl.listings.project_id, excluded.project_id)")
+            else:
+                set_parts.append(f"{c} = coalesce(excluded.{c}, crawl.listings.{c})")
+        listings_sql = f"""
+            insert into crawl.listings ({", ".join(listing_cols)})
+            values %s
+            on conflict (source_name, source_listing_id) do update set {", ".join(set_parts)}
+        """
+
+        disc_sql = """
+            insert into crawl.listing_discoveries
+                (source_name, source_listing_id, project_id, search_keyword, search_city, search_page,
+                 search_rank, match_level, name_in_title, name_in_desc, matched_name, match_ambiguous)
+            values %s
+            on conflict (source_name, source_listing_id, project_id, search_keyword, search_city) do update set
+                search_page     = excluded.search_page,
+                search_rank     = excluded.search_rank,
+                match_level     = excluded.match_level,
+                name_in_title   = excluded.name_in_title,
+                name_in_desc    = excluded.name_in_desc,
+                matched_name    = excluded.matched_name,
+                match_ambiguous = excluded.match_ambiguous,
+                last_seen_at    = now()
+        """
+
+        def fn(cur):
+            execute_values(cur, urls_sql,
+                           url_rows)  # listing_urls trước: listings và discoveries có khóa ngoại tới nó
+            if listing_rows:
+                execute_values(cur, listings_sql, listing_rows)
+            if disc_rows:
+                execute_values(cur, disc_sql, disc_rows)
+
+        self._run(fn)
+        return {"urls": len(url_rows), "listings": len(listing_rows), "discoveries": len(disc_rows)}
+
+    def release_source_job(self, project_id, source_name):
+        """Dừng chủ động giữa chừng (Ctrl+C): trả việc đang 'running' về 'pending' và không tính là một lần thử."""
+
+        def fn(cur):
+            cur.execute(
+                """update crawl.project_sources
+                   set crawl_status = 'pending', worker = null,
+                       crawl_attempts = greatest(crawl_attempts - 1, 0)
+                   where project_id = %s and source_name = %s and crawl_status = 'running'""",
+                (project_id, source_name),
+            )
+
+        self._run(fn)
