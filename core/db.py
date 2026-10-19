@@ -482,7 +482,7 @@ class Db:
     # ---------- Tin đăng: listing_urls + listings + listing_discoveries ----------
     def save_listing_records(self, records):
         """Ghi các tin vừa crawl trong 1 transaction.
-        records = list dict tạo bởi core.record.new_record (trường `discovery` là dict, xem crawlers/nhadatcanban.py).
+        records = list dict tạo bởi core.record.new_record (trường `discovery` là dict, xem crawlers/nhadatcanban_listings.py).
           1) crawl.listing_urls        mọi tin
           2) crawl.listings            chỉ tin đã lấy được trang chi tiết (detail_status = 'done')
           3) crawl.listing_discoveries từ khóa / trang / hạng / độ khớp đã tìm ra tin
